@@ -1,0 +1,4 @@
+results*
+__pycache__/
+causal_dataset*
+SIRD.RData
