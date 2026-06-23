@@ -649,7 +649,7 @@ else:
     all_rows = []
     
     # Track sum of VE across all parent-target pairs for each bootstrap resample
-    bootstrap_ve_sums = [[] for _ in range(num_bootstrap_resamples)]
+    bootstrap_viv_sums = [[] for _ in range(num_bootstrap_resamples)]
 
     for target in target_nodes:
         target_parents = list(causal_graph_all.predecessors(target))
@@ -659,7 +659,7 @@ else:
         print(f"\nTarget: {target} | Parents: {target_parents}")
 
         md_store = defaultdict(list)
-        ve_store = defaultdict(list)
+        viv_store = defaultdict(list)
 
         try:
             for b in range(num_bootstrap_resamples):
@@ -669,7 +669,7 @@ else:
 
                 boot_model = fit_model_on_bootstrap_sample(boot_data)
 
-                ve_strength_dict = gcm.arrow_strength(
+                viv_strength_dict = gcm.arrow_strength(
                     boot_model,
                     target,
                     n_jobs=1
@@ -678,17 +678,17 @@ else:
                 for parent in target_parents:
                     arrow_key = (parent, target)
 
-                    ve_value = ve_strength_dict.get(arrow_key, np.nan)
+                    viv_value = viv_strength_dict.get(arrow_key, np.nan)
 
-                    ve_store[parent].append(float(ve_value))
+                    viv_store[parent].append(float(viv_value))
                     
                     # Accumulate to bootstrap sums (skip NaN values)
-                    if not np.isnan(ve_value):
-                        bootstrap_ve_sums[b].append(float(ve_value))
+                    if not np.isnan(viv_value):
+                        bootstrap_viv_sums[b].append(float(viv_value))
 
             for parent in target_parents:
-                ve_vals = np.array(ve_store[parent], dtype=float)
-                ve_vals = ve_vals[~np.isnan(ve_vals)]
+                viv_vals = np.array(viv_store[parent], dtype=float)
+                viv_vals = viv_vals[~np.isnan(viv_vals)]
 
                 # Calculate p-values from bootstrap distributions
                 def calc_pvalue(bootstrap_vals):
@@ -702,20 +702,20 @@ else:
                         return 1.0 / len(bootstrap_vals)
                     return 2.0 * min(count_below_zero, count_above_zero) / len(bootstrap_vals)
 
-                ve_pvalue = calc_pvalue(ve_vals)
+                pvalue = calc_pvalue(vals)
 
                 # Significance flags (α = 0.05)
-                ve_significant = "Yes" if ve_pvalue < 0.05 else "No"
+                significant = "Yes" if pvalue < 0.05 else "No"
 
                 all_rows.append({
                     "Parent": parent,
                     "Target": target,
                     "Arrow": f"{parent} -> {target}",
-                    "Variance_Explained": np.mean(ve_vals) if len(ve_vals) else np.nan,
-                    "VE_CI_95_Lower": np.percentile(ve_vals, lower_q) if len(ve_vals) else np.nan,
-                    "VE_CI_95_Upper": np.percentile(ve_vals, upper_q) if len(ve_vals) else np.nan,
-                    "VE_P_Value": ve_pvalue,
-                    "VE_Significant": ve_significant,
+                    "Variation_In_Variance": np.mean(vals) if len(vals) else np.nan,
+                    "VIV_CI_95_Lower": np.percentile(vals, lower_q) if len(vals) else np.nan,
+                    "VIV_CI_95_Upper": np.percentile(vals, upper_q) if len(vals) else np.nan,
+                    "VIV_P_Value": pvalue,
+                    "VIV_Significant": significant,
                     "Bootstrap_Resamples": num_bootstrap_resamples,
                 })
 
@@ -724,7 +724,7 @@ else:
 
     strength_df = pd.DataFrame(all_rows)
     if not strength_df.empty:
-        strength_df = strength_df.sort_values(["Target", "Variance_Explained"], ascending=[True, False])
+        strength_df = strength_df.sort_values(["Target", "Variation_In_Variance"], ascending=[True, False])
 
     strength_output_path = os.path.join(
         results_dir,
@@ -732,72 +732,6 @@ else:
     )
     strength_df.to_csv(strength_output_path, index=False)
     print(f"\nSaved arrow strengths with bootstrap CIs: {strength_output_path}")
-
-    # =====================================================
-    # COMPUTE TOTAL VARIANCE EXPLAINED AND 95% CI
-    # =====================================================
-    
-    print("\n" + "="*80)
-    print("TOTAL VARIANCE EXPLAINED (Sum of Arrow Strengths)")
-    print("="*80)
-    
-    # Compute sums for each bootstrap resample
-    ve_sums = np.array([np.sum(sums) for sums in bootstrap_ve_sums])
-    
-    # Remove NaN or inf values
-    ve_sums = ve_sums[~np.isnan(ve_sums) & ~np.isinf(ve_sums)]
-    
-    # Compute statistics
-    ve_mean = np.mean(ve_sums)
-    ve_ci_lower = np.percentile(ve_sums, lower_q)
-    ve_ci_upper = np.percentile(ve_sums, upper_q)
-    ve_std = np.std(ve_sums)
-    
-    # Compute p-value: proportion of bootstrap samples on opposite side of zero
-    def calc_pvalue_ve(bootstrap_vals):
-        """Two-tailed p-value for variance explained"""
-        if len(bootstrap_vals) == 0:
-            return np.nan
-        count_below_zero = np.sum(bootstrap_vals < 0)
-        count_above_zero = np.sum(bootstrap_vals > 0)
-        if count_below_zero == 0 or count_above_zero == 0:
-            return 1.0 / len(bootstrap_vals)
-        return 2.0 * min(count_below_zero, count_above_zero) / len(bootstrap_vals)
-    
-    ve_pvalue = calc_pvalue_ve(ve_sums)
-    ve_significant = "Yes" if ve_pvalue < 0.05 else "No"
-    
-    print(f"\nVariance Explained (Sum across all arrows):")
-    print(f"  Mean:          {ve_mean:.6f}")
-    print(f"  Std Dev:       {ve_std:.6f}")
-    print(f"  95% CI:        [{ve_ci_lower:.6f}, {ve_ci_upper:.6f}]")
-    print(f"  P-Value:       {ve_pvalue:.6f}")
-    print(f"  Significant:   {ve_significant}")
-    print(f"  Bootstrap Samples with valid sums: {len(ve_sums)}/{num_bootstrap_resamples}")
-    
-    # Save summary statistics
-    summary_rows = [
-        {
-            "Metric": "Total Variance Explained",
-            "Mean": ve_mean,
-            "Std_Dev": ve_std,
-            "CI_95_Lower": ve_ci_lower,
-            "CI_95_Upper": ve_ci_upper,
-            "P_Value": ve_pvalue,
-            "Significant": ve_significant,
-            "Bootstrap_Samples": len(ve_sums),
-            "Total_Bootstrap_Resamples": num_bootstrap_resamples
-        }
-    ]
-    
-    summary_df = pd.DataFrame(summary_rows)
-    summary_output_path = os.path.join(
-        results_dir,
-        "causal_inference_total_arrow_strength_summary.csv"
-    )
-    summary_df.to_csv(summary_output_path, index=False)
-    print(f"\nSaved total arrow strength summary: {summary_output_path}")
-
 
 # =====================================================
 # ATE ESTIMATION
