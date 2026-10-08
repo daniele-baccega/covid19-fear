@@ -249,7 +249,6 @@ def recode_demographics_post_xgboost(df):
 
     if 'region_code' in df_local.columns:
         # Remove region_code variable
-        # df_local = df_local.drop(columns=['region_code'])
         df_local = df_local[df_local['region_code'] != 0]
 
     return df_local
@@ -292,7 +291,7 @@ def apply_numeric_encodings(df, state_numeric_mapping, region_numeric_mapping):
     df['region_code'] = df['region'].map(region_numeric_mapping)
     return df
 
-def load_or_extract_datasets(causal_csv_path='causal_dataset.csv',
+def load_or_extract_datasets(causal_csv_path='data/causal_dataset.csv',
                             extract_func=None):
     """
     Load datasets from CSV if they exist, otherwise extract them.
@@ -397,9 +396,9 @@ def extract_and_prepare_datasets(source_directory='../../repositorios/cmu-dates'
     print(f"  After:  {final_rows:,} rows")
     print(f"  Removed: {removed_rows:,} rows ({100*removed_rows/initial_rows:.1f}%)")
     
-    data_causal_model.to_csv('causal_dataset.csv', index=False)
-    data_causal_model.head(1000).to_csv('causal_dataset_sample.csv', index=False)
-    print("Saved causal_dataset.csv and causal_dataset_sample.csv")
+    data_causal_model.to_csv('data/causal_dataset.csv', index=False)
+    data_causal_model.head(1000).to_csv('data/causal_dataset_sample.csv', index=False)
+    print("Saved data/causal_dataset.csv and data/causal_dataset_sample.csv")
 
     return data_causal_model
 

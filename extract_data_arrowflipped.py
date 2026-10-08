@@ -6,10 +6,12 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+from matplotlib.ticker import PercentFormatter
 import pickle
-import seaborn as sns
 from collections import defaultdict
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 
 from dowhy import gcm, CausalModel
 
@@ -17,17 +19,191 @@ from utils import *
 
 rng = np.random.default_rng(42)
 
+def plot_arrow_strength_grid(
+    df,
+    panel_col="Target",
+    label_col="Parent",
+    value_col="Variance_Explained",
+    ci_lower_col="VE_CI_95_Lower",
+    ci_upper_col="VE_CI_95_Upper",
+    sig_col="VE_Significant",
+    nrows=3,
+    ncols=3,
+    figsize=(20, 14),
+    sort_desc=True,
+    top_n=None,
+    percent_axis_right=True,
+    rotate_xticks=35,
+    color_sig="#76B7EB",
+    color_nonsig="#C9D3DD",
+    edgecolor="#222222",
+    alpha=0.9,
+    sharey=False,
+    title=None,
+    suptitle_y=0.98
+):
+    """
+    Create a 3x3 grid of bar plots with asymmetric 95% CI error bars.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with one row per arrow.
+    panel_col : str
+        Column defining each subplot, typically 'Target'.
+    label_col : str
+        X-axis labels inside each subplot, typically 'Parent'.
+    value_col : str
+        Bar height column, typically 'Variance_Explained'.
+    ci_lower_col : str
+        Lower bound of 95% CI.
+    ci_upper_col : str
+        Upper bound of 95% CI.
+    sig_col : str or None
+        Optional column used to color significant vs non-significant bars.
+        Expected values like 'Yes'/'No' or boolean.
+    nrows, ncols : int
+        Grid shape. Default is 3x3.
+    figsize : tuple
+        Figure size.
+    sort_desc : bool
+        Whether to sort bars within each panel by descending value.
+    top_n : int or None
+        If set, keep only top_n bars per panel.
+    percent_axis_right : bool
+        Add a secondary right y-axis with percentages.
+    rotate_xticks : int
+        Rotation angle for x tick labels.
+    color_sig, color_nonsig : str
+        Colors for significant/non-significant bars.
+    edgecolor : str
+        Bar edge color.
+    alpha : float
+        Bar transparency.
+    sharey : bool
+        Whether subplots share y axis.
+    title : str or None
+        Overall figure title.
+    suptitle_y : float
+        Vertical position of figure title.
+
+    Returns
+    -------
+    fig, axes
+    """
+    df = df.copy()
+
+    needed = [panel_col, label_col, value_col, ci_lower_col, ci_upper_col]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    df = df.dropna(subset=[panel_col, label_col, value_col, ci_lower_col, ci_upper_col])
+
+    panels = list(pd.unique(df[panel_col]))
+    max_panels = nrows * ncols
+    if len(panels) > max_panels:
+        raise ValueError(
+            f"Found {len(panels)} panels but grid allows only {max_panels}. "
+            f"Increase nrows/ncols or filter the dataframe."
+        )
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, sharey=sharey)
+    axes = np.atleast_1d(axes).ravel()
+
+    global_ymax = 0
+    prepared = {}
+
+    for panel in panels:
+        sub = df[df[panel_col] == panel].copy()
+
+        if sort_desc:
+            sub = sub.sort_values(value_col, ascending=False)
+
+        if top_n is not None:
+            sub = sub.head(top_n)
+
+        y = sub[value_col].to_numpy()
+        yerr_lower = y - sub[ci_lower_col].to_numpy()
+        yerr_upper = sub[ci_upper_col].to_numpy() - y
+
+        yerr_lower = np.clip(yerr_lower, 0, None)
+        yerr_upper = np.clip(yerr_upper, 0, None)
+
+        ymax_panel = np.nanmax(sub[ci_upper_col].to_numpy()) if len(sub) else 0
+        global_ymax = max(global_ymax, ymax_panel)
+
+        prepared[panel] = (sub, y, yerr_lower, yerr_upper)
+
+    if global_ymax <= 0:
+        global_ymax = 1.0
+    global_ymax *= 1.12
+
+    for i, panel in enumerate(panels):
+        ax = axes[i]
+        sub, y, yerr_lower, yerr_upper = prepared[panel]
+
+        if sig_col is not None and sig_col in sub.columns:
+            sig_vals = sub[sig_col].astype(str).str.lower()
+            colors = [
+                color_sig if v in {"yes", "true", "1"} else color_nonsig
+                for v in sig_vals
+            ]
+        else:
+            colors = [color_sig] * len(sub)
+
+        x = np.arange(len(sub))
+
+        ax.bar(
+            x,
+            y,
+            color=colors,
+            edgecolor=edgecolor,
+            alpha=alpha,
+            linewidth=1.2,
+            yerr=np.vstack([yerr_lower, yerr_upper]),
+            ecolor="#3A3A3A",
+            capsize=5
+        )
+
+        ax.set_title(str(panel), fontsize=13, pad=10)
+        ax.set_xticks(x)
+        ax.set_xticklabels(sub[label_col].astype(str), rotation=rotate_xticks, ha="right")
+        ax.set_ylim(0, global_ymax)
+        ax.grid(axis="y", alpha=0.25, linestyle="-")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if i % ncols == 0:
+            ax.set_ylabel("Variance explained")
+
+        if percent_axis_right:
+            axr = ax.twinx()
+            axr.set_ylim(ax.get_ylim())
+            axr.yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=1))
+            axr.set_ylabel("Variance explained (%)")
+            axr.grid(False)
+
+    for j in range(len(panels), len(axes)):
+        axes[j].axis("off")
+
+    if title is not None:
+        fig.suptitle(title, fontsize=18, y=suptitle_y)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96] if title else None)
+    return fig, axes
+
 # =====================================================
 # DATA EXTRACTION AND LOADING
 # =====================================================
 
 data_causal_model = load_or_extract_datasets(
-    causal_csv_path='causal_dataset.csv',
+    causal_csv_path='data/causal_dataset.csv',
     extract_func=extract_and_prepare_datasets
 )
-data_causal_model = add_infection_from_sird(data_causal_model, 'SIRD.RData', 'EndDatetime')
+data_causal_model = add_infection_from_sird(data_causal_model, 'data/SIRD.RData', 'EndDatetime')
 
-results_dir = 'results'
+results_dir = 'results_G1_I5'
 if not os.path.exists(results_dir):
     os.makedirs(results_dir)
     print(f"Created results directory: {results_dir}")
@@ -47,7 +223,14 @@ else:
 
     data_causal_model = data_causal_model.drop(columns="I5")
 
-    data_causal_model = add_infection_from_sird(data_causal_model, 'SIRD.RData', 'EndDatetime')
+    data_causal_model = add_infection_from_sird(data_causal_model, 'data/SIRD.RData', 'EndDatetime')
+
+    # Fallback to legacy path, then default to zeros to avoid downstream KeyError.
+    if 'Infection' not in data_causal_model.columns:
+        data_causal_model = add_infection_from_sird(data_causal_model, 'SIRD.RData', 'EndDatetime')
+    if 'Infection' not in data_causal_model.columns:
+        print("Warning: Infection column unavailable after SIRD merge attempts. Filling with 0.0.")
+        data_causal_model['Infection'] = 0.0
 
     for col in data_causal_model.columns:
         if col not in ['EndDatetime', 'Infection']:
@@ -166,8 +349,7 @@ else:
     )
     
     ax.set_ylabel('Infection Count', fontsize=12)
-    ax.set_xlabel('Date', fontsize=12)
-    ax.set_title('Infections Over Time with Wave Cutoff and Trend', fontsize=13, fontweight='bold')
+    ax.set_xlabel('', fontsize=12)
     ax.legend(fontsize=10, loc='upper left', framealpha=0.95)
     ax.grid(True, alpha=0.3)
     
@@ -185,285 +367,76 @@ else:
     print(f"  After:  {len(data_causal_model):,} rows")
     print(f"  Removed: {removed_rows:,} rows ({100*removed_rows/initial_rows:.1f}%)")
 
+    # =====================================================
+    # RESTRICTIONS DATA
+    # =====================================================
+
+    restrictions_all = pd.read_csv("data/OxCGRT_compact_subnational_v1.csv")
+    restrictions_all["Date"] = pd.to_datetime(restrictions_all["Date"], format="%Y%m%d")
+
+    restrictions_all = (
+        restrictions_all
+        .assign(date=restrictions_all["Date"])
+        .loc[
+            (restrictions_all["Date"] <= data_causal_model["EndDatetime"].max()) &
+            (restrictions_all["Date"] >= data_causal_model["EndDatetime"].min()) &
+            (restrictions_all["CountryName"] == "United States"),
+            [
+                "Date",
+                "RegionName",
+                "StringencyIndex_Average"
+            ]
+        ]
+    )
+
+    restrictions_all = restrictions_all.rename(columns={"RegionName": "state"})
+    restrictions_all = restrictions_all.dropna(subset=["state"])
+
+    zipcode_mapping_path = "utils/uszips.csv"
+    region_mapping_path = "utils/county_fips_master.csv"
+    state_mapping = load_zipcode_mapping(zipcode_mapping_path)
+    region_mapping = load_region_mapping(region_mapping_path)
+    restrictions_all = map_states_to_regions(restrictions_all, region_mapping)
+    state_numeric_mapping, region_numeric_mapping = create_numeric_encodings(state_mapping, region_mapping)
+    restrictions_all = apply_numeric_encodings(restrictions_all, state_numeric_mapping, region_numeric_mapping)
+    restrictions_all = restrictions_all.groupby(['Date', 'region_code'], as_index=False)["StringencyIndex_Average"].mean()
+    restrictions_all.to_csv(os.path.join(results_dir, 'restrictions_data.csv'), index=False)
+
+    plt.figure(figsize=(14, 6))
+    for region_name, group_data in restrictions_all.groupby('region_code'):
+        plt.plot(group_data['Date'], group_data['StringencyIndex_Average'], label=f"Region: {region_name}")
+    plt.xlabel('Date')
+    plt.ylabel('Index Value')
+    plt.ylim(0, 100)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    restrictions_dist_path = os.path.join(results_dir, 'distribution_restrictions.png')
+    plt.savefig(restrictions_dist_path, dpi=300, bbox_inches='tight')
+    print(f"Saved restrictions distribution plot: {restrictions_dist_path}")
+    plt.close()
+
+    data_causal_model['EndDatetime'] = pd.to_datetime(data_causal_model['EndDatetime'], errors='coerce')
+    restrictions_all['Date'] = pd.to_datetime(restrictions_all['Date'], errors='coerce')
+
+    data_causal_model = data_causal_model.merge(
+        restrictions_all[['Date', 'StringencyIndex_Average']],
+        left_on='EndDatetime',
+        right_on='Date',
+        how='left'
+    ).drop(columns=['Date'])
+
+    data_causal_model['StringencyIndex_Average'] = pd.cut(
+        data_causal_model['StringencyIndex_Average'],
+        bins=np.arange(0, 110, 10),
+        labels=np.arange(1, 11),
+        right=False
+    ).astype(float)
+
     data_causal_model.to_csv(final_dataset_path, index=False)
     data_causal_model.head(n=1000).to_csv(
         os.path.join(results_dir, 'causal_dataset_final_sample.csv'),
         index=False
     )
-
-# =====================================================
-# ADD INFECTION TREND AND WAVE
-# =====================================================
-
-print("\n" + "="*60)
-print("Infection Trend and Wave Variables")
-print("="*60)
-
-if 'infection_trend' in data_causal_model.columns:
-    trend_mapping = {-1: 'decreasing', 1: 'rising_or_stable'}
-    data_causal_model['infection_trend_cat'] = data_causal_model['infection_trend'].map(trend_mapping)
-
-    print(f"Infection Trend Distribution (based on derivative):")
-    print(data_causal_model['infection_trend_cat'].value_counts())
-    print(f"\nTrend values: 1 (rising or stable - derivative >= 0), -1 (decreasing - derivative < 0)")
-
-if 'wave' in data_causal_model.columns:
-    print(f"\nWave Distribution:")
-    print(data_causal_model['wave'].value_counts().sort_index())
-
-# =====================================================
-# DISTRIBUTION PLOTS (APPROPRIATE FOR DATA TYPES)
-# =====================================================
-
-print("\n" + "="*60)
-print("Variable Distribution Analysis")
-print("="*60)
-
-source_cols = ["I5_1", "I5_2", "I5_3", "I5_4", "I5_5", "I5_6", "I5_7", "I5_8", "I5_9"]
-trust_cols = ["I6_1", "I6_2", "I6_3", "I6_4", "I6_5", "I6_6", "I6_7", "I6_8"]
-demographic_cols = ["D1", "D2", "D8", "D9", "D12", "region_code"]
-
-# Define label mappings
-label_mappings = {
-    'I5': {0: 'Not use', 1: 'Use'},
-    'I6': {1: 'Not trust', 2: 'Somewhat trust', 3: 'Trust'},
-    'D1': {1: 'Male', 2: 'Female'},
-    'D2': {1: '18-34', 2: '35-64', 3: '65+'},
-    'D8': {1: 'High school or lower', 2: 'Bachelor/Master', 3: 'Postgraduate'},
-    'D9': {1: 'Yes', 2: 'No'},
-    'D12': {1: 'English', 2: 'Other'},
-    'region_code': {1: 'Northeast', 2: 'Midwest', 3: 'South', 4: 'West'},
-    'V1': {0: 'Yes', 1: 'No'},
-    'G1': {1: 'Not at all', 2: 'A little', 3: 'Moderate', 4: 'A great deal'}
-}
-
-# Variable display names
-var_names = {'I5': 'Source', 'I6': 'Trust', 'D1': 'Gender', 'D2': 'Age', 'D8': 'Education', 'D9': 'Occupation', 'D12': 'Language', 'region_code': 'Region', 'V1': 'Vaccination', 'G1': 'Fear', 'A4': 'Sick'}
-
-# Specific labels for I5 and I6 information sources
-i5_labels = {
-    'I5_1': 'Doctors',
-    'I5_2': 'Scientists',
-    'I5_3': 'CDC',
-    'I5_4': 'Government',
-    'I5_5': 'Politicians',
-    'I5_6': 'Journalists',
-    'I5_7': 'Family and friends',
-    'I5_8': 'Religious leaders',
-    'I5_9': 'None of the above'
-}
-
-i6_labels = {
-    'I6_1': 'Doctors',
-    'I6_2': 'Scientists',
-    'I6_3': 'CDC',
-    'I6_4': 'Government',
-    'I6_5': 'Politicians',
-    'I6_6': 'Journalists',
-    'I6_7': 'Family and friends',
-    'I6_8': 'Religious leaders'
-}
-
-# I5 (Binary Information Sources) - Stacked bar plot
-if all(col in data_causal_model.columns for col in source_cols):
-    # Prepare data for stacked bar plot
-    i5_data = []
-    for col in source_cols:
-        value_counts = data_causal_model[col].value_counts().sort_index()
-        percentages = (value_counts / value_counts.sum()) * 100
-        i5_data.append(percentages)
-    
-    # Create DataFrame for easier stacking
-    i5_df = pd.DataFrame(i5_data, index=[i5_labels[col] for col in source_cols])
-    i5_df = i5_df.fillna(0)
-    # Reverse column order so "Use" (1) is at bottom
-    i5_df = i5_df[[col for col in sorted(i5_df.columns, reverse=True)]]
-    
-    # Create stacked bar plot
-    fig, ax = plt.subplots(figsize=(14, 6))
-    i5_df.plot(kind='bar', stacked=True, ax=ax, color=['#B3E5B3', '#FFB3B3'], edgecolor='black', width=0.7)
-    
-    ax.set_ylabel('Percentage (%)', fontsize=14)
-    ax.set_xticklabels(i5_df.index, rotation=30, ha='right', fontsize=14)
-    ax.tick_params(axis='y', labelsize=13)
-    ax.legend([label_mappings['I5'].get(v, str(v)) for v in i5_df.columns], title='Usage', loc='upper right', fontsize=12, title_fontsize=13)
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    i5_dist_path = os.path.join(results_dir, 'distribution_i5_sources.png')
-    plt.savefig(i5_dist_path, dpi=300, bbox_inches='tight')
-    print(f"Saved I5 distribution plot: {i5_dist_path}")
-    plt.close()
-    
-    # Save I5 distribution data as CSV
-    i5_csv_path = os.path.join(results_dir, 'distribution_i5_sources.csv')
-    i5_df.to_csv(i5_csv_path)
-    print(f"Saved I5 distribution data: {i5_csv_path}")
-
-# I6 (Trust with 3 values) - Stacked bar plot
-if all(col in data_causal_model.columns for col in trust_cols):
-    # Prepare data for stacked bar plot
-    i6_data = []
-    for col in trust_cols:
-        value_counts = data_causal_model[col].value_counts().sort_index()
-        percentages = (value_counts / value_counts.sum()) * 100
-        i6_data.append(percentages)
-    
-    # Create DataFrame for easier stacking
-    i6_df = pd.DataFrame(i6_data, index=[i6_labels[col] for col in trust_cols])
-    i6_df = i6_df.fillna(0)
-    # Reorder columns: 3 (Trust), 2 (Somewhat), 1 (Not trust) so Trust is at bottom
-    i6_df = i6_df[[col for col in [3, 2, 1] if col in i6_df.columns]]
-    
-    # Create stacked bar plot
-    fig, ax = plt.subplots(figsize=(14, 6))
-    i6_df.plot(kind='bar', stacked=True, ax=ax, color=['#B3E5B3', '#FFFFCC', '#FFB3B3'], edgecolor='black', width=0.7)
-    
-    ax.set_ylabel('Percentage (%)', fontsize=14)
-    ax.set_xticklabels(i6_df.index, rotation=30, ha='right', fontsize=14)
-    ax.tick_params(axis='y', labelsize=13)
-    ax.legend(['Trust', 'Somewhat', 'Not trust'], title='Trust Level', loc='upper right', fontsize=12, title_fontsize=13)
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    i6_dist_path = os.path.join(results_dir, 'distribution_i6_trust.png')
-    plt.savefig(i6_dist_path, dpi=300, bbox_inches='tight')
-    print(f"Saved I6 distribution plot: {i6_dist_path}")
-    plt.close()
-    
-    # Save I6 distribution data as CSV
-    i6_csv_path = os.path.join(results_dir, 'distribution_i6_trust.csv')
-    i6_df.to_csv(i6_csv_path)
-    print(f"Saved I6 distribution data: {i6_csv_path}")
-
-# Demographics (Binary/Categorical) - Barplots with %
-demo_cols_exist = [col for col in demographic_cols if col in data_causal_model.columns]
-if demo_cols_exist:
-    n_demos = len(demo_cols_exist)
-    n_cols = 3
-    n_rows = (n_demos + n_cols - 1) // n_cols  # Calculate rows needed
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 6))
-    axes = axes.flatten()  # Flatten to 1D for easier iteration
-    
-    for idx, col in enumerate(demo_cols_exist):
-        value_counts = data_causal_model[col].value_counts().sort_index()
-        percentages = (value_counts / value_counts.sum()) * 100
-        axes[idx].set_title(var_names.get(col, col), fontsize=12, fontweight='bold')
-        axes[idx].bar(percentages.index, percentages.values, color='#D9F0D9', edgecolor='black')
-        # Only show y-axis label on first plot of each row
-        if idx % n_cols == 0:
-            axes[idx].set_ylabel('Percentage (%)', fontsize=13)
-        axes[idx].set_xticks(sorted(percentages.index))
-        if col == 'D8':
-            # Split Education labels on 2 rows
-            d8_labels = [label_mappings[col].get(v, str(v)) for v in sorted(percentages.index)]
-            d8_labels_wrapped = [label.replace('/', '/\n').replace(' or ', '\nor ') for label in d8_labels]
-            axes[idx].set_xticklabels(d8_labels_wrapped, fontsize=13)
-        else:
-            axes[idx].set_xticklabels([label_mappings[col].get(v, str(v)) for v in sorted(percentages.index)], fontsize=13)            
-        axes[idx].tick_params(axis='y', labelsize=12)
-        axes[idx].grid(True, alpha=0.3, axis='y')
-    
-    # Hide any unused subplots
-    for idx in range(len(demo_cols_exist), len(axes)):
-        axes[idx].axis('off')
-    
-    plt.tight_layout()
-    demo_dist_path = os.path.join(results_dir, 'distribution_demographics.png')
-    plt.savefig(demo_dist_path, dpi=300, bbox_inches='tight')
-    print(f"Saved demographics distribution plot: {demo_dist_path}")
-    plt.close()
-    
-    # Save demographics distribution data as CSV
-    demo_data_all = []
-    for col in demo_cols_exist:
-        value_counts = data_causal_model[col].value_counts().sort_index()
-        percentages = (value_counts / value_counts.sum()) * 100
-        for val, pct in percentages.items():
-            label = label_mappings[col].get(val, str(val))
-            demo_data_all.append({
-                'Variable': var_names.get(col, col),
-                'Value': label,
-                'Percentage': pct,
-                'Count': value_counts[val]
-            })
-    demo_csv_df = pd.DataFrame(demo_data_all)
-    demo_csv_path = os.path.join(results_dir, 'distribution_demographics.csv')
-    demo_csv_df.to_csv(demo_csv_path, index=False)
-    print(f"Saved demographics distribution data: {demo_csv_path}")
-
-# G1 (Fear - 4 values), V1 (Binary), A4 (0-100 continuous-like)
-fig, axes = plt.subplots(1, 3, figsize=(14, 3))
-
-# G1 (4 values)
-if 'G1' in data_causal_model.columns:
-    g1_counts = data_causal_model['G1'].value_counts().sort_index()
-    g1_pct = (g1_counts / g1_counts.sum()) * 100
-    axes[0].set_title('Fear', fontsize=12, fontweight='bold')
-    axes[0].bar(g1_pct.index, g1_pct.values, color='#E6D9FF', edgecolor='black')
-    axes[0].set_ylabel('Percentage (%)', fontsize=13)
-    axes[0].set_xticks([1, 2, 3, 4])
-    axes[0].set_xticklabels(['Not at all', 'A little', 'Moderate', 'Great deal'], fontsize=13)
-    axes[0].tick_params(axis='y', labelsize=12)
-    axes[0].grid(True, alpha=0.3, axis='y')
-
-# V1 (Binary - note: already converted to 0,1)
-if 'V1' in data_causal_model.columns:
-    v1_counts = data_causal_model['V1'].value_counts().sort_index()
-    v1_pct = (v1_counts / v1_counts.sum()) * 100
-    axes[1].set_title('Vaccinated', fontsize=12, fontweight='bold')
-    axes[1].bar(v1_pct.index, v1_pct.values, color='#FFFFE0', edgecolor='black')
-    axes[1].set_ylabel('Percentage (%)', fontsize=13)
-    axes[1].set_xticks(sorted(v1_pct.index))
-    axes[1].set_xticklabels([label_mappings['V1'].get(v, str(v)) for v in sorted(v1_pct.index)], fontsize=13)
-    axes[1].tick_params(axis='y', labelsize=12)
-    axes[1].grid(True, alpha=0.3, axis='y')
-
-# A4 (Continuous 0-100) - Histogram with %
-if 'A4' in data_causal_model.columns:
-    axes[2].set_title('Sick', fontsize=12, fontweight='bold')
-    axes[2].hist(data_causal_model['A4'], bins=30, color='#B3D9FF', edgecolor='black', alpha=0.7, weights=np.ones(len(data_causal_model))/len(data_causal_model)*100)
-    axes[2].set_ylabel('Percentage (%)', fontsize=13)
-    axes[2].tick_params(axis='both', labelsize=12)
-    axes[2].grid(True, alpha=0.3, axis='y')
-
-plt.tight_layout()
-outcome_dist_path = os.path.join(results_dir, 'distribution_outcomes.png')
-plt.savefig(outcome_dist_path, dpi=300, bbox_inches='tight')
-print(f"Saved outcomes distribution plot: {outcome_dist_path}")
-plt.close()
-
-# Save outcomes distribution data as CSV
-outcome_data_all = []
-if 'G1' in data_causal_model.columns:
-    g1_counts = data_causal_model['G1'].value_counts().sort_index()
-    g1_pct = (g1_counts / g1_counts.sum()) * 100
-    g1_labels = ['Not at all', 'A little', 'Moderate', 'Great deal']
-    for val, pct in g1_pct.items():
-        val_int = int(val)
-        outcome_data_all.append({
-            'Variable': 'Fear',
-            'Value': g1_labels[val_int - 1] if 1 <= val_int <= 4 else str(val),
-            'Percentage': pct,
-            'Count': g1_counts[val]
-        })
-if 'V1' in data_causal_model.columns:
-    v1_counts = data_causal_model['V1'].value_counts().sort_index()
-    v1_pct = (v1_counts / v1_counts.sum()) * 100
-    for val, pct in v1_pct.items():
-        label = label_mappings['V1'].get(val, str(val))
-        outcome_data_all.append({
-            'Variable': 'Vaccinated',
-            'Value': label,
-            'Percentage': pct,
-            'Count': v1_counts[val]
-        })
-outcome_csv_df = pd.DataFrame(outcome_data_all)
-outcome_csv_path = os.path.join(results_dir, 'distribution_outcomes.csv')
-outcome_csv_df.to_csv(outcome_csv_path, index=False)
-print(f"Saved outcomes distribution data: {outcome_csv_path}")
-
-print("\nDistribution plots and data files generated successfully.")
 
 # =====================================================
 # CAUSAL GRAPH
@@ -483,6 +456,16 @@ edges += [(bg_col, "A4") for bg_col in ["D2", "D12", "region_code"] + wave_and_i
 edges += [(trust_col, source_col) for trust_col, source_col in zip(trust_cols, source_cols)]
 edges += [("G1", source_col) for source_col in source_cols]
 edges += [("V1", "G1"), ("A4", "G1")]
+
+edges += [("region_code", "StringencyIndex_Average"),
+          ("wave", "StringencyIndex_Average"),
+          ("infection_trend", "StringencyIndex_Average")]
+
+edges += [("StringencyIndex_Average", trust_col) for trust_col in trust_cols]
+edges += [("StringencyIndex_Average", source_col) for source_col in source_cols]
+
+edges += [("StringencyIndex_Average", "A4"),
+          ("StringencyIndex_Average", "G1")]
 
 print(edges)
 
@@ -555,6 +538,198 @@ print(f"\nSaved results to: {os.path.join(results_dir, 'categorical_associations
 
 # =====================================================
 # CAUSAL INFERENCE
+# =====================================================
+
+# =====================================================
+# ATE ESTIMATION
+# =====================================================
+
+print("\n" + "="*80)
+print("AVERAGE TREATMENT EFFECT (ATE) ESTIMATION")
+print("Estimating causal effects of Fear (G1) on Information Sources (I5)")
+print("="*80)
+
+ate_data = data_causal_model.copy()
+ate_results = []
+
+treatment_var = "G1"
+all_confounders = ["D1", "D2", "D8", "D9", "D12", "region_code", "wave", "infection_trend", "StringencyIndex_Average"]
+
+# Determine if treatment is binary or multi-valued
+n_treatment_values = ate_data[treatment_var].nunique()
+is_binary = n_treatment_values == 2
+method_type = "Binary (propensity score)" if is_binary else "Multi-valued (linear regression)"
+
+print("\n" + "-"*80)
+print(f"ATE for {treatment_var} → Information Sources (I5)")
+print(f"Treatment type: {method_type}")
+print(f"Number of treatment values: {n_treatment_values}")
+print("-"*80)
+
+# Estimate G1's effect on each source variable
+for outcome_var in source_cols:
+    if outcome_var not in ate_data.columns:
+        continue
+
+    try:
+        model = CausalModel(
+            data=ate_data,
+            treatment=treatment_var,
+            outcome=outcome_var,
+            common_causes=all_confounders,
+            graph=causal_graph_all
+        )
+
+        identified_estimand = model.identify_effect(proceed_when_unidentifiable=True)
+        
+        # Choose method based on treatment type
+        if is_binary:
+            method = "backdoor.propensity_score_stratification"
+        else:
+            method = "backdoor.linear_regression"
+        
+        ate_estimate = model.estimate_effect(identified_estimand, method_name=method)
+
+        print(f"{outcome_var:15s}: ATE = {ate_estimate.value:+.6f}")
+
+        ate_results.append({
+            'Treatment': treatment_var,
+            'Outcome': outcome_var,
+            'ATE': ate_estimate.value,
+            'Method': method.split('.')[-1],
+            'N_Confounders': len(all_confounders)
+        })
+
+    except Exception as e:
+        print(f"{outcome_var:15s}: Error - {str(e)[:80]}")
+
+if ate_results:
+    ate_df = pd.DataFrame(ate_results).sort_values('ATE', key=abs, ascending=False)
+    ate_df.to_csv(os.path.join(results_dir, 'ate_estimation_results.csv'), index=False)
+
+    print(f"\n{'='*80}\nATE Results Saved\n{'='*80}")
+    print(ate_df[['Treatment', 'Outcome', 'ATE', 'Method']].to_string(index=False))
+
+    print(f"\n{'='*80}\nSummary Statistics\n{'='*80}")
+    print(f"Mean ATE (Fear → Sources): {ate_df['ATE'].mean():.6f}")
+    print(f"Std ATE: {ate_df['ATE'].std():.6f}")
+    print(f"Min ATE: {ate_df['ATE'].min():.6f}")
+    print(f"Max ATE: {ate_df['ATE'].max():.6f}")
+    print(f"\nPositive effects (n={len(ate_df[ate_df['ATE'] > 0])}): Sources where higher fear increases usage")
+    print(f"Negative effects (n={len(ate_df[ate_df['ATE'] < 0])}): Sources where higher fear decreases usage")
+    print(f"\n{'='*80}")
+
+    # =====================================================
+    # K-MEANS CLUSTERING OF ATE VALUES
+    # =====================================================
+
+    print(f"\n{'='*80}\nK-MEANS CLUSTERING OF ATE VALUES\n{'='*80}")
+
+    # Prepare data for clustering
+    ate_values = ate_df[['ATE']].values
+    scaler = StandardScaler()
+    ate_scaled = scaler.fit_transform(ate_values)
+
+    # Test different numbers of clusters
+    k_range = range(2, 5)
+    silhouette_scores = []
+    kmeans_models = {}
+
+    print(f"\nEvaluating k-means for k = 2 to 5...")
+    for k in k_range:
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(ate_scaled)
+        sil_score = silhouette_score(ate_scaled, cluster_labels)
+        silhouette_scores.append(sil_score)
+        kmeans_models[k] = kmeans
+        print(f"  k={k}: Silhouette Score = {sil_score:.4f}")
+
+    # Find optimal k
+    optimal_k = k_range[np.argmax(silhouette_scores)]
+    optimal_score = max(silhouette_scores)
+    print(f"\nOptimal number of clusters: k={optimal_k} (Silhouette Score: {optimal_score:.4f})")
+
+    # Save cluster info for the top-2 k values by silhouette score.
+    k_to_score = dict(zip(k_range, silhouette_scores))
+    top_2_k = sorted(k_to_score, key=k_to_score.get, reverse=True)[:2]
+    print(f"Top-2 k by silhouette score: {top_2_k}")
+
+    top2_summary_rows = []
+    for rank, k in enumerate(top_2_k, 1):
+        cluster_col = f'Cluster_k{k}'
+        ate_df[cluster_col] = kmeans_models[k].predict(ate_scaled)
+
+        clustered_k_path = os.path.join(results_dir, f'ate_estimation_results_clustered_k{k}.csv')
+        ate_df.to_csv(clustered_k_path, index=False)
+        print(f"Saved clustered ATE results for top-{rank} k={k}: {clustered_k_path}")
+
+        top2_summary_rows.append({
+            'Rank': rank,
+            'k': k,
+            'Silhouette_Score': k_to_score[k],
+            'Output_File': os.path.basename(clustered_k_path)
+        })
+
+    top2_summary_path = os.path.join(results_dir, 'ate_top2_k_silhouette_scores.csv')
+    pd.DataFrame(top2_summary_rows).to_csv(top2_summary_path, index=False)
+    print(f"Saved top-2 k silhouette summary: {top2_summary_path}")
+
+    # Fit final model with optimal k
+    final_kmeans = kmeans_models[optimal_k]
+    ate_df['Cluster'] = final_kmeans.predict(ate_scaled)
+
+    # Add cluster sizes and centroid distances
+    cluster_sizes = ate_df['Cluster'].value_counts().sort_index()
+    print(f"\nCluster Distribution:")
+    for cluster_id in sorted(ate_df['Cluster'].unique()):
+        cluster_data = ate_df[ate_df['Cluster'] == cluster_id]
+        print(f"  Cluster {cluster_id}: n={len(cluster_data)}, Mean ATE={cluster_data['ATE'].mean():.6f}, Std={cluster_data['ATE'].std():.6f}")
+
+    # Save clustered results
+    ate_clustered_path = os.path.join(results_dir, 'ate_estimation_results_clustered.csv')
+    ate_df.to_csv(ate_clustered_path, index=False)
+    print(f"\nSaved clustered ATE results: {ate_clustered_path}")
+
+    # Create silhouette score plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(k_range, silhouette_scores, 'bo-', linewidth=2, markersize=8)
+    ax.axvline(x=optimal_k, color='red', linestyle='--', linewidth=2, label=f'Optimal k={optimal_k}')
+    ax.set_xlabel('Number of Clusters (k)', fontsize=12)
+    ax.set_ylabel('Silhouette Score', fontsize=12)
+    ax.set_title('K-Means Silhouette Score Analysis', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=11)
+    ax.set_xticks(list(k_range))
+    plt.tight_layout()
+    silhouette_path = os.path.join(results_dir, 'ate_silhouette_scores.png')
+    plt.savefig(silhouette_path, dpi=300, bbox_inches='tight')
+    print(f"Saved silhouette score plot: {silhouette_path}")
+    plt.close()
+
+    # Create scatter plot of ATE values colored by cluster
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = plt.cm.Set3(np.linspace(0, 1, optimal_k))
+    for cluster_id in sorted(ate_df['Cluster'].unique()):
+        cluster_data = ate_df[ate_df['Cluster'] == cluster_id]
+        ax.scatter(range(len(cluster_data)), cluster_data['ATE'].values, 
+                  c=[colors[cluster_id]], label=f'Cluster {cluster_id}', 
+                  s=100, alpha=0.7, edgecolors='black', linewidth=1)
+    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    ax.set_xlabel('Treatment Index', fontsize=12)
+    ax.set_ylabel('ATE Value', fontsize=12)
+    ax.set_title(f'ATE Values by K-Means Cluster (k={optimal_k})', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    cluster_scatter_path = os.path.join(results_dir, 'ate_cluster_scatter.png')
+    plt.savefig(cluster_scatter_path, dpi=300, bbox_inches='tight')
+    print(f"Saved cluster scatter plot: {cluster_scatter_path}")
+    plt.close()
+
+    print(f"\n{'='*80}")
+
+# =====================================================
+# ESTIMATE OF ARROW STRENGTH
 # =====================================================
 
 print("\n" + "="*80)
@@ -645,11 +820,10 @@ else:
         gcm.auto.assign_causal_mechanisms(boot_model, boot_data)
         gcm.fit(boot_model, boot_data)
         return boot_model
-
-    all_rows = []
     
-    # Track sum of VE across all parent-target pairs for each bootstrap resample
-    bootstrap_ve_sums = [[] for _ in range(num_bootstrap_resamples)]
+    target_summary_rows = []
+
+    target_nodes = ["I5_3", "I5_4", "I5_5", "I5_6", "I5_7", "I5_8", "I5_9"]
 
     for target in target_nodes:
         target_parents = list(causal_graph_all.predecessors(target))
@@ -660,10 +834,12 @@ else:
 
         md_store = defaultdict(list)
         ve_store = defaultdict(list)
+        target_rows = []  # Rows specific to this target
+        target_ve_sums = [[] for _ in range(num_bootstrap_resamples)]  # VE sums for this target
 
         try:
             for b in range(num_bootstrap_resamples):
-                print(f"  Bootstrap resample {b+1}/{num_bootstrap_resamples}", end='\r')
+                print(f"  Bootstrap resample {b+1}/{num_bootstrap_resamples}")
                 boot_idx = rng.integers(0, len(gcm_data), size=len(gcm_data))
                 boot_data = gcm_data.iloc[boot_idx].reset_index(drop=True)
 
@@ -682,9 +858,9 @@ else:
 
                     ve_store[parent].append(float(ve_value))
                     
-                    # Accumulate to bootstrap sums (skip NaN values)
+                    # Accumulate to target-specific sums (skip NaN values)
                     if not np.isnan(ve_value):
-                        bootstrap_ve_sums[b].append(float(ve_value))
+                        target_ve_sums[b].append(float(ve_value))
 
             for parent in target_parents:
                 ve_vals = np.array(ve_store[parent], dtype=float)
@@ -707,7 +883,7 @@ else:
                 # Significance flags (α = 0.05)
                 ve_significant = "Yes" if ve_pvalue < 0.05 else "No"
 
-                all_rows.append({
+                target_rows.append({
                     "Parent": parent,
                     "Target": target,
                     "Arrow": f"{parent} -> {target}",
@@ -721,159 +897,67 @@ else:
 
         except Exception as e:
             print(f"Error for target {target}: {str(e)}")
+        
+        # Save each target's arrow strengths to separate file
+        if target_rows:
+            target_strength_df = pd.DataFrame(target_rows)
+            target_strength_df = target_strength_df.sort_values("Variance_Explained", ascending=False)
+            target_output_path = os.path.join(
+                results_dir,
+                f"arrow_strength_{target}.csv"
+            )
+            target_strength_df.to_csv(target_output_path, index=False)
+            print(f"Saved {target} arrow strengths: {target_output_path}")
+            
+            # Compute total variance explained for this target
+            target_ve_sums_array = np.array([np.sum(sums) for sums in target_ve_sums])
+            target_ve_sums_array = target_ve_sums_array[~np.isnan(target_ve_sums_array) & ~np.isinf(target_ve_sums_array)]
 
-    strength_df = pd.DataFrame(all_rows)
-    if not strength_df.empty:
-        strength_df = strength_df.sort_values(["Target", "Variance_Explained"], ascending=[True, False])
+            if len(target_ve_sums_array) > 0:
+                target_ve_mean = np.mean(target_ve_sums_array)
+                target_ve_ci_lower = np.percentile(target_ve_sums_array, lower_q)
+                target_ve_ci_upper = np.percentile(target_ve_sums_array, upper_q)
+                target_ve_std = np.std(target_ve_sums_array)
+                
+                def calc_pvalue_target(bootstrap_vals):
+                    if len(bootstrap_vals) == 0:
+                        return np.nan
+                    count_below_zero = np.sum(bootstrap_vals < 0)
+                    count_above_zero = np.sum(bootstrap_vals > 0)
+                    if count_below_zero == 0 or count_above_zero == 0:
+                        return 1.0 / len(bootstrap_vals)
+                    return 2.0 * min(count_below_zero, count_above_zero) / len(bootstrap_vals)
+                
+                target_ve_pvalue = calc_pvalue_target(target_ve_sums_array)
+                target_ve_significant = "Yes" if target_ve_pvalue < 0.05 else "No"
+                
+                target_summary_rows.append({
+                    "Target": target,
+                    "Total_VE_Mean": target_ve_mean,
+                    "Total_VE_Std": target_ve_std,
+                    "Total_VE_CI_95_Lower": target_ve_ci_lower,
+                    "Total_VE_CI_95_Upper": target_ve_ci_upper,
+                    "Total_VE_P_Value": target_ve_pvalue,
+                    "Total_VE_Significant": target_ve_significant,
+                    "N_Parents": len(target_parents),
+                    "Parents": ", ".join(target_parents),
+                    "Bootstrap_Samples": len(target_ve_sums_array),
+                    "Total_Bootstrap_Resamples": num_bootstrap_resamples
+                })
+                
+                print(f"  Total VE for {target}: {target_ve_mean:.6f} [{target_ve_ci_lower:.6f}, {target_ve_ci_upper:.6f}]")
 
-    strength_output_path = os.path.join(
-        results_dir,
-        "causal_inference_full_dataset_arrow_strength.csv"
-    )
-    strength_df.to_csv(strength_output_path, index=False)
-    print(f"\nSaved arrow strengths with bootstrap CIs: {strength_output_path}")
-
-    # =====================================================
-    # COMPUTE TOTAL VARIANCE EXPLAINED AND 95% CI
-    # =====================================================
-    
-    print("\n" + "="*80)
-    print("TOTAL VARIANCE EXPLAINED (Sum of Arrow Strengths)")
-    print("="*80)
-    
-    # Compute sums for each bootstrap resample
-    ve_sums = np.array([np.sum(sums) for sums in bootstrap_ve_sums])
-    
-    # Remove NaN or inf values
-    ve_sums = ve_sums[~np.isnan(ve_sums) & ~np.isinf(ve_sums)]
-    
-    # Compute statistics
-    ve_mean = np.mean(ve_sums)
-    ve_ci_lower = np.percentile(ve_sums, lower_q)
-    ve_ci_upper = np.percentile(ve_sums, upper_q)
-    ve_std = np.std(ve_sums)
-    
-    # Compute p-value: proportion of bootstrap samples on opposite side of zero
-    def calc_pvalue_ve(bootstrap_vals):
-        """Two-tailed p-value for variance explained"""
-        if len(bootstrap_vals) == 0:
-            return np.nan
-        count_below_zero = np.sum(bootstrap_vals < 0)
-        count_above_zero = np.sum(bootstrap_vals > 0)
-        if count_below_zero == 0 or count_above_zero == 0:
-            return 1.0 / len(bootstrap_vals)
-        return 2.0 * min(count_below_zero, count_above_zero) / len(bootstrap_vals)
-    
-    ve_pvalue = calc_pvalue_ve(ve_sums)
-    ve_significant = "Yes" if ve_pvalue < 0.05 else "No"
-    
-    print(f"\nVariance Explained (Sum across all arrows):")
-    print(f"  Mean:          {ve_mean:.6f}")
-    print(f"  Std Dev:       {ve_std:.6f}")
-    print(f"  95% CI:        [{ve_ci_lower:.6f}, {ve_ci_upper:.6f}]")
-    print(f"  P-Value:       {ve_pvalue:.6f}")
-    print(f"  Significant:   {ve_significant}")
-    print(f"  Bootstrap Samples with valid sums: {len(ve_sums)}/{num_bootstrap_resamples}")
-    
-    # Save summary statistics
-    summary_rows = [
-        {
-            "Metric": "Total Variance Explained",
-            "Mean": ve_mean,
-            "Std_Dev": ve_std,
-            "CI_95_Lower": ve_ci_lower,
-            "CI_95_Upper": ve_ci_upper,
-            "P_Value": ve_pvalue,
-            "Significant": ve_significant,
-            "Bootstrap_Samples": len(ve_sums),
-            "Total_Bootstrap_Resamples": num_bootstrap_resamples
-        }
-    ]
-    
-    summary_df = pd.DataFrame(summary_rows)
-    summary_output_path = os.path.join(
-        results_dir,
-        "causal_inference_total_arrow_strength_summary.csv"
-    )
-    summary_df.to_csv(summary_output_path, index=False)
-    print(f"\nSaved total arrow strength summary: {summary_output_path}")
-
-
-# =====================================================
-# ATE ESTIMATION
-# =====================================================
-
-print("\n" + "="*80)
-print("AVERAGE TREATMENT EFFECT (ATE) ESTIMATION")
-print("Estimating causal effects of Fear (G1) on Information Sources (I5)")
-print("="*80)
-
-ate_data = data_causal_model.copy()
-ate_results = []
-
-treatment_var = "G1"
-all_confounders = ["D1", "D2", "D8", "D9", "D12", "region_code", "wave", "infection_trend"]
-
-# Determine if treatment is binary or multi-valued
-n_treatment_values = ate_data[treatment_var].nunique()
-is_binary = n_treatment_values == 2
-method_type = "Binary (propensity score)" if is_binary else "Multi-valued (linear regression)"
-
-print("\n" + "-"*80)
-print(f"ATE for {treatment_var} → Information Sources (I5)")
-print(f"Treatment type: {method_type}")
-print(f"Number of treatment values: {n_treatment_values}")
-print("-"*80)
-
-# Estimate G1's effect on each source variable
-for outcome_var in source_cols:
-    if outcome_var not in ate_data.columns:
-        continue
-
-    try:
-        model = CausalModel(
-            data=ate_data,
-            treatment=treatment_var,
-            outcome=outcome_var,
-            common_causes=all_confounders,
-            graph=causal_graph_all
+    # Save summary of total VE per target
+    if target_summary_rows:
+        target_summary_df = pd.DataFrame(target_summary_rows).sort_values("Total_VE_Mean", ascending=False)
+        target_summary_path = os.path.join(
+            results_dir,
+            "arrow_strength_summary_per_target.csv"
         )
+        target_summary_df.to_csv(target_summary_path, index=False)
+        print(f"\nSaved summary of total VE per target: {target_summary_path}")
 
-        identified_estimand = model.identify_effect(proceed_when_unidentifiable=True)
-        
-        # Choose method based on treatment type
-        if is_binary:
-            method = "backdoor.propensity_score_stratification"
-        else:
-            method = "backdoor.linear_regression"
-        
-        ate_estimate = model.estimate_effect(identified_estimand, method_name=method)
-
-        print(f"{outcome_var:15s}: ATE = {ate_estimate.value:+.6f}")
-
-        ate_results.append({
-            'Treatment': treatment_var,
-            'Outcome': outcome_var,
-            'ATE': ate_estimate.value,
-            'Method': method.split('.')[-1],
-            'N_Confounders': len(all_confounders)
-        })
-
-    except Exception as e:
-        print(f"{outcome_var:15s}: Error - {str(e)[:80]}")
-
-if ate_results:
-    ate_df = pd.DataFrame(ate_results).sort_values('ATE', key=abs, ascending=False)
-    ate_df.to_csv(os.path.join(results_dir, 'ate_estimation_results.csv'), index=False)
-
-    print(f"\n{'='*80}\nATE Results Saved\n{'='*80}")
-    print(ate_df[['Treatment', 'Outcome', 'ATE', 'Method']].to_string(index=False))
-
-    print(f"\n{'='*80}\nSummary Statistics\n{'='*80}")
-    print(f"Mean ATE (Fear → Sources): {ate_df['ATE'].mean():.6f}")
-    print(f"Std ATE: {ate_df['ATE'].std():.6f}")
-    print(f"Min ATE: {ate_df['ATE'].min():.6f}")
-    print(f"Max ATE: {ate_df['ATE'].max():.6f}")
-    print(f"\nPositive effects (n={len(ate_df[ate_df['ATE'] > 0])}): Sources where higher fear increases usage")
-    print(f"Negative effects (n={len(ate_df[ate_df['ATE'] < 0])}): Sources where higher fear decreases usage")
-    print(f"\n{'='*80}")
+    print("\n" + "="*80)
+    print("ARROW STRENGTH ANALYSIS COMPLETE")
+    print("="*80)
+    print(f"Generated separate files for each target node.")
