@@ -845,7 +845,7 @@ else:
 
                 boot_model = fit_model_on_bootstrap_sample(boot_data)
 
-                ve_strength_dict = gcm.arrow_strength(
+                viv_strength_dict = gcm.arrow_strength(
                     boot_model,
                     target,
                     n_jobs=1
@@ -854,17 +854,17 @@ else:
                 for parent in target_parents:
                     arrow_key = (parent, target)
 
-                    ve_value = ve_strength_dict.get(arrow_key, np.nan)
+                    viv_value = viv_strength_dict.get(arrow_key, np.nan)
 
-                    ve_store[parent].append(float(ve_value))
+                    viv_store[parent].append(float(viv_value))
                     
                     # Accumulate to target-specific sums (skip NaN values)
                     if not np.isnan(ve_value):
                         target_ve_sums[b].append(float(ve_value))
 
             for parent in target_parents:
-                ve_vals = np.array(ve_store[parent], dtype=float)
-                ve_vals = ve_vals[~np.isnan(ve_vals)]
+                viv_vals = np.array(viv_store[parent], dtype=float)
+                viv_vals = viv_vals[~np.isnan(viv_vals)]
 
                 # Calculate p-values from bootstrap distributions
                 def calc_pvalue(bootstrap_vals):
@@ -878,20 +878,20 @@ else:
                         return 1.0 / len(bootstrap_vals)
                     return 2.0 * min(count_below_zero, count_above_zero) / len(bootstrap_vals)
 
-                ve_pvalue = calc_pvalue(ve_vals)
+                viv_pvalue = calc_pvalue(viv_vals)
 
                 # Significance flags (α = 0.05)
-                ve_significant = "Yes" if ve_pvalue < 0.05 else "No"
+                viv_significant = "Yes" if viv_pvalue < 0.05 else "No"
 
                 target_rows.append({
                     "Parent": parent,
                     "Target": target,
                     "Arrow": f"{parent} -> {target}",
-                    "Variance_Explained": np.mean(ve_vals) if len(ve_vals) else np.nan,
-                    "VE_CI_95_Lower": np.percentile(ve_vals, lower_q) if len(ve_vals) else np.nan,
-                    "VE_CI_95_Upper": np.percentile(ve_vals, upper_q) if len(ve_vals) else np.nan,
-                    "VE_P_Value": ve_pvalue,
-                    "VE_Significant": ve_significant,
+                    "Variation_In_Variance": np.mean(viv_vals) if len(viv_vals) else np.nan,
+                    "VIV_CI_95_Lower": np.percentile(viv_vals, lower_q) if len(viv_vals) else np.nan,
+                    "VIV_CI_95_Upper": np.percentile(viv_vals, upper_q) if len(viv_vals) else np.nan,
+                    "VIV_P_Value": viv_pvalue,
+                    "VIV_Significant": viv_significant,
                     "Bootstrap_Resamples": num_bootstrap_resamples,
                 })
 
