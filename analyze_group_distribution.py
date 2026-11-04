@@ -5,7 +5,7 @@ import os
 background_col = ["D1", "D2", "D8", "D9", "D12", "region_code", "infection_trend", "wave"]
 
 # Load the final dataset
-results_dir = 'results'
+results_dir = 'results_I5_G1'
 final_dataset_path = os.path.join(results_dir, 'causal_dataset_final.csv')
 
 if not os.path.exists(final_dataset_path):
@@ -26,6 +26,13 @@ else:
     
     # Merge the two dataframes
     group_counts = group_counts.merge(group_g1, on=background_col)
+    
+    # Detect and add I5_* variables for each group
+    i5_cols = [col for col in data.columns if col.startswith('I5_')]
+    for i5_col in i5_cols:
+        group_i5 = data.groupby(background_col, observed=True)[i5_col].mean().reset_index(name=f'avg_{i5_col}')
+        group_counts = group_counts.merge(group_i5, on=background_col)
+    
     group_counts = group_counts.sort_values('row_count', ascending=False)
     
     print(f"\nTotal unique group combinations: {len(group_counts)}")
@@ -57,6 +64,24 @@ else:
         col_dist = col_dist.sort_values('Count', ascending=False)
         print(col_dist.to_string(index=False))
         print(f"  Total unique values: {col_dist.shape[0]}")
+    
+    # Distribution of I5_* by individual background variables
+    i5_cols = [col for col in data.columns if col.startswith('I5_')]
+    if i5_cols:
+        for i5_col in i5_cols:
+            print(f"\n" + "-"*80)
+            print(f"Distribution of {i5_col} by Individual Variables:")
+            print("-"*80)
+            
+            for col in background_col:
+                print(f"\n{col}:")
+                col_dist_i5 = data.groupby(col).agg({
+                    i5_col: ['count', 'mean', 'std']
+                }).reset_index()
+                col_dist_i5.columns = ['Value', 'Count', f'Avg_{i5_col}', f'Std_{i5_col}']
+                col_dist_i5 = col_dist_i5.sort_values('Count', ascending=False)
+                print(col_dist_i5.to_string(index=False))
+                print(f"  Total unique values: {col_dist_i5.shape[0]}")
     
     # Identify all possible combinations and missing ones
     print(f"\n" + "-"*80)
@@ -135,6 +160,20 @@ else:
     print(f"\nTop 15 groups with LOWEST average fear (G1):")
     print(group_counts_by_g1[['avg_G1', 'row_count'] + background_col].tail(15).to_string(index=False))
     
+    # Show groups sorted by average I5_* variables
+    i5_cols = [col for col in data.columns if col.startswith('I5_')]
+    for i5_col in i5_cols:
+        print(f"\n" + "="*80)
+        print(f"Groups Sorted by Average {i5_col}:")
+        print("="*80)
+        
+        group_counts_by_i5 = group_counts.sort_values(f'avg_{i5_col}', ascending=False)
+        print(f"\nTop 15 groups with HIGHEST average {i5_col}:")
+        print(group_counts_by_i5[[f'avg_{i5_col}', 'row_count'] + background_col].head(15).to_string(index=False))
+        
+        print(f"\nTop 15 groups with LOWEST average {i5_col}:")
+        print(group_counts_by_i5[[f'avg_{i5_col}', 'row_count'] + background_col].tail(15).to_string(index=False))
+    
     # Summary statistics for G1
     print(f"\n" + "-"*80)
     print("G1 Summary Statistics:")
@@ -146,6 +185,20 @@ else:
     print(f"Std of group means: {group_counts['avg_G1'].std():.4f}")
     print(f"Min group avg G1: {group_counts['avg_G1'].min():.4f}")
     print(f"Max group avg G1: {group_counts['avg_G1'].max():.4f}")
+    
+    # Summary statistics for I5_* variables
+    i5_cols = [col for col in data.columns if col.startswith('I5_')]
+    for i5_col in i5_cols:
+        print(f"\n" + "-"*80)
+        print(f"{i5_col} Summary Statistics:")
+        print("-"*80)
+        print(f"Overall mean {i5_col}: {data[i5_col].mean():.4f}")
+        print(f"Overall variance {i5_col}: {data[i5_col].var():.4f}")
+        print(f"Overall std {i5_col}: {data[i5_col].std():.4f}")
+        print(f"Mean {i5_col} across groups: {group_counts[f'avg_{i5_col}'].mean():.4f}")
+        print(f"Std of group means: {group_counts[f'avg_{i5_col}'].std():.4f}")
+        print(f"Min group avg {i5_col}: {group_counts[f'avg_{i5_col}'].min():.4f}")
+        print(f"Max group avg {i5_col}: {group_counts[f'avg_{i5_col}'].max():.4f}")
     
     # Create summary statistics by each background variable
     print(f"\n" + "="*80)

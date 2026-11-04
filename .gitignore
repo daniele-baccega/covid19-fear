@@ -1,3 +1,7 @@
 results*
 __pycache__/
 causal_dataset*
+arrow_strength_I5_grid.png
+ate_estimation_results_G1.png
+plot_ATE.py
+plot_sensitivity.py
